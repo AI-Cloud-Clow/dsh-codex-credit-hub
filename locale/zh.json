@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Codex 额度监控",
+    "description": "在左侧边栏底部、头像上方显示「Codex」订阅限流窗口和「Codex API」OpenAI 平台真实余额。Codex API 自动复用本机 platform.openai.com 登录态，不接受、不读取、不保存 API Key；支持「刷新」与「同步 OpenAI 登录态」，并提供 codex_cli_quota 与 codex_api_quota 两个 Agent 工具。",
+    "detail": "docs/DETAIL.zh.md"
+  }
+}
