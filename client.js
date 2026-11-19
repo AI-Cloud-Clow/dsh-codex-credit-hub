@@ -84,8 +84,18 @@ window.__ModuleLoader__.load({
       }
       const mutate = async (mutEndpoint, payload) => {
         const current = ++generation
+        const previous = snapshot
+        emit({ ...snapshot, error: undefined })
         const result = await callApi(mutEndpoint, payload)
-        if (!result.ok) throw new Error(result.error.message)
+        if (!result.ok) {
+          const message = result.error.message
+          if (!disposed && current === generation) {
+            const next = previous.status === 'ok' ? { ...previous, error: message } : { ...previous, status: previous.status === 'unauthorized' ? 'unauthorized' : 'error', error: message }
+            emit(next)
+            schedule(next)
+          }
+          throw new Error(message)
+        }
         if (disposed || current !== generation) return result.value
         emit(result.value); schedule(result.value)
         return result.value
@@ -227,15 +237,15 @@ window.__ModuleLoader__.load({
               h('div', null, h('div', { className: 'cxh-factLabel' }, t('totalUsed')), h('div', { className: 'cxh-factValue' }, formatUsd(quota.totalUsedUsd))),
               nextExpiry && h('div', null, h('div', { className: 'cxh-factLabel' }, t('nextExpiry')), h('div', { className: 'cxh-factValue' }, formatResetTime(nextExpiry.expiresAtMs)))),
             h('div', { className: 'cxh-footer' }, h('span', { className: 'cxh-updated' }, `${t('updated')} ${updated}`), h('div', { className: 'cxh-footerActions' }, syncButton, h('button', { type: 'button', className: 'cxh-refresh', disabled: busy !== '', onClick: refresh }, h(RefreshIcon), busy === 'refresh' ? t('refreshing') : t('refresh'))))),
-          quota && state.error && h('p', { className: 'cxh-error', role: 'status' }, state.error),
+          quota && state.error && !actionError && h('p', { className: 'cxh-error', role: 'status' }, state.error),
           !quota && state.status === 'loading' && h('div', { className: 'cxh-loading' }, t('loading')),
-          !quota && state.status !== 'loading' && h('p', { className: state.status === 'unauthorized' ? 'cxh-help' : 'cxh-error', role: 'status' }, state.error || t('error')),
+          !quota && state.status !== 'loading' && !actionError && h('p', { className: state.status === 'unauthorized' ? 'cxh-help' : 'cxh-error', role: 'status' }, state.error || t('error')),
           actionError && h('p', { className: 'cxh-error', role: 'status' }, actionError),
           !quota && state.status !== 'loading' && h('p', { className: 'cxh-help' }, isCli ? t('cliHint') : t('apiHint')),
           !quota && state.status !== 'loading' && h('div', { className: 'cxh-errorActions' }, isCli
             ? h('button', { type: 'button', className: 'cxh-retry', disabled: busy !== '', onClick: refresh }, busy === 'refresh' ? t('refreshing') : t('retry'))
             : h('button', { type: 'button', className: 'cxh-primary', disabled: busy !== '', onClick: sync }, busy === 'sync' ? t('syncingBrowser') : t('syncBrowser'))),
-          h('button', { type: 'button', className: 'cxh-manage', onClick: manage }, h('span', null, t('manage')), h('span', { 'aria-hidden': true }, '↗')),
+          quota && h('button', { type: 'button', className: 'cxh-manage', onClick: manage }, h('span', null, t('manage')), h('span', { 'aria-hidden': true }, '↗')),
         ), document.body),
       )
     }

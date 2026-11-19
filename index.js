@@ -515,6 +515,7 @@ async function fetchOpenAiCreditBalanceFromBody(body, organizationId = '') {
 let openAiBrowserSyncInFlight = null
 let openAiBrowserSyncLastAttempt = 0
 let openAiBrowserSyncLastError = ''
+let openAiLoginPending = null
 const OPENAI_SYNC_SCRIPT = readFileSync(new URL('./openai-sync.inc.js', import.meta.url), 'utf8')
 
 async function syncOpenAiSessionFromEgoBrowserOnce(signal) {
@@ -630,6 +631,14 @@ function subscribeOpenAiBrowserSync(entry, signal) {
 
 async function syncOpenAiSessionFromEgoBrowser(force = false, signal) {
   if (openAiBrowserSyncInFlight) return await subscribeOpenAiBrowserSync(openAiBrowserSyncInFlight, signal)
+  if (!force && openAiLoginPending) {
+    return {
+      code: 'login-required',
+      needsLogin: true,
+      taskSpaceId: openAiLoginPending.taskSpaceId,
+      error: 'OpenAI 登录页已打开，请先完成登录，再点击「同步 OpenAI 登录态」；后台不会打断登录',
+    }
+  }
   if (!force && openAiBrowserSyncLastAttempt > 0 && openAiBrowserSyncLastError && Date.now() - openAiBrowserSyncLastAttempt < OPENAI_BROWSER_SYNC_COOLDOWN_MS) {
     return { error: openAiBrowserSyncLastError }
   }
@@ -646,6 +655,9 @@ async function syncOpenAiSessionFromEgoBrowser(force = false, signal) {
       // A caller-local cancellation is not the shared task's outcome. Record
       // only the browser result, and clear stale errors after a real success.
       openAiBrowserSyncLastError = result?.error ? scrubSecrets(result.error) : ''
+      openAiLoginPending = result?.needsLogin && result?.taskSpaceId
+        ? { taskSpaceId: result.taskSpaceId }
+        : null
       return result
     })
     .catch(() => {
@@ -893,6 +905,19 @@ export class CodexApiQuotaService {
       }
     }
 
+    // Opening a browser is an explicit user action, not a startup side effect.
+    // Stored sessions may recover automatically; first-time setup uses the
+    // visible "Sync OpenAI login" button in the popover.
+    if (!stored) {
+      return this.commit(generation, {
+        status: 'unauthorized',
+        error: '尚未连接 OpenAI Platform。点击「同步 OpenAI 登录态」开始连接；无需输入 API Key',
+        canSync: true,
+        webUrl: OPENAI_API_WEB_URL,
+        preferences: this.getPreferences(),
+      })
+    }
+
     const synced = await this.syncFromBrowser({ internal: true, signal, expectedGeneration: generation })
     if (synced.ok) return synced.state
     return this.commit(generation, {
@@ -924,7 +949,10 @@ export class CodexApiQuotaService {
       return { ok: false, error: '同步已被更新或取消，请重试' }
     }
     const generation = ++this.generation
-    if (!options.internal) this.inFlight?.abort()
+    if (!options.internal) {
+      this.inFlight?.abort()
+      openAiLoginPending = null
+    }
     const sessionKey = normalizeSecretInput(session.sessionKey)
     const organizationId = typeof session.organizationId === 'string' ? session.organizationId.trim() : ''
     if (!sessionKey.startsWith('sess-')) return { ok: false, error: 'OpenAI Platform 登录态无效，请重新同步' }
@@ -952,8 +980,6 @@ export class CodexApiQuotaService {
     const payload = {
       sessionKey,
       organizationId,
-      source: 'openai-platform-browser',
-      updatedAt: Date.now(),
     }
     try {
       await this.ctx.credentials.modifyRecord(this.key, async () => ({ kind: 'grant', payload }))
