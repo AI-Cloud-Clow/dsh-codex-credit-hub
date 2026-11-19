@@ -29,7 +29,7 @@ window.__ModuleLoader__.load({
       nextExpiry: 'Next Expiry', updated: 'Updated', refresh: 'Refresh', refreshing: 'Refreshing…',
       manage: 'Manage usage', close: 'Close quota details', error: 'Unable to load Codex quota', retry: 'Try again',
       syncBrowser: 'Sync OpenAI login', syncingBrowser: 'Syncing…',
-      apiHint: 'Reads your existing platform.openai.com login session automatically. No API key is required.',
+      apiHint: 'Requires Ego Lite. If the OpenAI login page opens, sign in there, then click Sync OpenAI login again. No API key is required.',
       cliHint: 'Reads ~/.codex/auth.json (read-only) or `codex app-server`. Run `codex login` in terminal to sign in.',
     }
     const zh = {
@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
       nextExpiry: '最近到期', updated: '更新于', refresh: '刷新', refreshing: '刷新中…',
       manage: '管理用量', close: '关闭额度详情', error: '暂时无法读取 Codex 额度', retry: '重试',
       syncBrowser: '同步 OpenAI 登录态', syncingBrowser: '同步中…',
-      apiHint: '自动复用本机 platform.openai.com 登录态获取真实余额，无需输入 API Key。',
+      apiHint: '需要安装 Ego Lite。若打开 OpenAI 登录页，请先完成登录，再点击一次「同步 OpenAI 登录态」；无需输入 API Key。',
       cliHint: '自动只读读取 ~/.codex/auth.json 或 codex app-server；若未登录请在终端执行 `codex login`。',
     }
 
