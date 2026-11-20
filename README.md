@@ -50,7 +50,7 @@ dsh-codex-credit-hub
 指定版本安装（避免包管理器的最新版本观察期影响）：
 
 ```text
-dsh-codex-credit-hub@1.2.0
+dsh-codex-credit-hub@1.2.1
 ```
 
 ### 本地目录安装

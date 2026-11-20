@@ -5,14 +5,20 @@ let task;
 if (existing?.ownership === "agentDelegatedToUser") {
   task = await takeOverTaskSpace(existing.id);
 } else if (existing?.ownership === "user") {
-  task = await claimTaskSpace(existing.id);
+  // Never hijack a user-owned TaskSpace with claimTaskSpace; create our own
+  // isolated space so we do not navigate away from whatever the user is doing.
+  task = await taskSpace("codex-credit-openai-session-agent");
 } else if (existing) {
   task = await taskSpace(existing.id);
 } else {
   task = await taskSpace("codex-credit-openai-session");
 }
-const pages = await task.pages();
-const page = pages[0] ?? await task.adopt((await task.tabs())[0].page);
+const existingPages = await task.pages();
+let page = existingPages[0];
+if (!page) {
+  const tabs = await task.tabs();
+  page = tabs[0]?.page ? await task.adopt(tabs[0].page) : await task.newPage();
+}
 let result = { sessionKey: null, organizationId: "", balance: null, error: "", code: "" };
 
 const readBalance = async () => {
@@ -34,6 +40,7 @@ const readBalance = async () => {
     let accessToken = "";
     let refreshToken = "";
     let accessExpiresAt = 0;
+    let deviceId = "";
     try {
       const raw = localStorage.getItem("oai-auth:onboard");
       const auth = raw ? JSON.parse(raw) : null;
@@ -42,10 +49,14 @@ const readBalance = async () => {
       if (typeof auth?.accessToken === "string") {
         const parts = auth.accessToken.split(".");
         if (parts[1]) {
-          const payload = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
+          const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+          const padded = b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), "=");
+          const payload = JSON.parse(atob(padded));
           if (typeof payload?.exp === "number") accessExpiresAt = payload.exp > 1e12 ? payload.exp : payload.exp * 1000;
         }
       }
+      const didMatch = /(?:^|;\s*)oai-did=([^;\s]+)/.exec(document.cookie || "");
+      if (didMatch?.[1]) deviceId = decodeURIComponent(didMatch[1]);
     } catch {}
     if (!accessToken) return { code: "login-required", error: "请先在已打开的 Ego Lite 页面登录 OpenAI Platform，登录成功后返回插件再次点击同步" };
 
@@ -86,11 +97,13 @@ const readBalance = async () => {
     }
     return {
       ok: true,
+      source: "openai-platform-ego",
       sessionKey,
       organizationId,
       accessToken,
       refreshToken,
       accessExpiresAt,
+      deviceId,
       balance: body,
     };
   });

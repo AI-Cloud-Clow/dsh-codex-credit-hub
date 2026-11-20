@@ -9,7 +9,7 @@ import { credentialKey } from '@deepseek-ai/dsh-credentials'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 export const name = 'codex-credit-hub'
-export const inject = ['connection', 'credentials', 'tools', 'webServer']
+export const inject = ['connection', 'credentials', 'tools']
 
 export const RECORD_SCOPE = 'codex-credit-hub'
 export const RECORD_ID_API = 'codex-api'
@@ -59,9 +59,10 @@ export function normalizeSecretInput(raw) {
 export function scrubSecrets(text) {
   return String(text ?? '')
     .replace(/sk-(?:proj-|admin-|svcacct-)?[A-Za-z0-9_-]{12,}/g, '[redacted-key]')
-    .replace(/sess-[A-Za-z0-9_-]{12,}/g, '[redacted-sess]')
+    .replace(/sess-[A-Za-z0-9_-]{8,}/g, '[redacted-sess]')
     .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[redacted-jwt]')
-    .replace(/rt[._][A-Za-z0-9._~+/=-]{8,}/g, '[redacted-refresh]')
+    .replace(/rt[._-][A-Za-z0-9._~+/=-]{8,}/g, '[redacted-refresh]')
+    .replace(/("?(?:refresh_token|refreshToken|access_token|accessToken|id_token|idToken|sessionKey|sensitive_id)"?\s*:\s*")[^"]+(")/g, '$1[redacted]$2')
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer [redacted]')
     .slice(0, 1000)
 }
@@ -101,7 +102,21 @@ function requestFailure(error, label) {
   }
 }
 
+function getFetchEnv() {
+  const hasProxy = Boolean(
+    process.env.HTTPS_PROXY || process.env.https_proxy
+    || process.env.HTTP_PROXY || process.env.http_proxy
+    || process.env.ALL_PROXY || process.env.all_proxy,
+  )
+  if (hasProxy && process.env.NODE_USE_ENV_PROXY === undefined) {
+    // Enable Node 22.19+ / 24+ built-in environment proxy support when the user
+    // configured HTTP(S)_PROXY, so pure Node renewal shares the terminal proxy.
+    process.env.NODE_USE_ENV_PROXY = '1'
+  }
+}
+
 async function fetchJson(url, options, label) {
+  getFetchEnv()
   try {
     const response = await fetch(url, options)
     const text = await response.text()
@@ -424,7 +439,7 @@ export async function fetchCodexViaAppServer(signal) {
       child.stdin.write(JSON.stringify({
         id: 1,
         method: 'initialize',
-        params: { clientInfo: { name: 'dsh-codex-credit-hub', version: '1.0.0' } },
+        params: { clientInfo: { name: 'dsh-codex-credit-hub', version: '1.2.1' } },
       }) + '\n')
     } catch (error) {
       finish({ ok: false, status: 500, message: scrubSecrets(error instanceof Error ? error.message : String(error)) })
@@ -524,17 +539,25 @@ let openAiBrowserSyncLastErrorCode = ''
 let openAiLoginPending = null
 const OPENAI_SYNC_SCRIPT = readFileSync(new URL('./openai-sync.inc.js', import.meta.url), 'utf8')
 
+function buildEgoBrowserPath() {
+  if (process.env.CODEX_DISABLE_EGO_BROWSER === '1') return process.env.PATH ?? ''
+  return [
+    process.env.PATH ?? '',
+    '/usr/local/bin',
+    '/opt/homebrew/bin',
+    join(homedir(), '.local', 'bin'),
+    join(homedir(), '.ego-lite', 'bin'),
+  ].filter(Boolean).join(delimiter)
+}
+
 async function syncOpenAiSessionFromEgoBrowserOnce(signal, allowHandoff = false) {
+  if (process.env.CODEX_DISABLE_EGO_BROWSER === '1') {
+    return { code: 'no-ego-browser', error: '未检测到 Ego Lite / ego-browser' }
+  }
   return await new Promise((resolve) => {
     const script = OPENAI_SYNC_SCRIPT.replace('__ALLOW_HANDOFF__', allowHandoff ? 'true' : 'false')
 
-    const envPath = [
-      process.env.PATH ?? '',
-      '/usr/local/bin',
-      '/opt/homebrew/bin',
-      join(homedir(), '.local', 'bin'),
-      join(homedir(), '.ego-lite', 'bin'),
-    ].filter(Boolean).join(delimiter)
+    const envPath = buildEgoBrowserPath()
 
     const child = spawn('ego-browser', ['nodejs', '-e', script], {
       env: { ...process.env, PATH: envPath },
@@ -759,8 +782,9 @@ function findLocalChromiumBrowser() {
       { name: 'Microsoft Edge', path: '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge' },
       { name: 'Microsoft Edge', path: join(homedir(), 'Applications', 'Microsoft Edge.app', 'Contents', 'MacOS', 'Microsoft Edge') },
       { name: 'Brave Browser', path: '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser' },
+      { name: 'Brave Browser', path: join(homedir(), 'Applications', 'Brave Browser.app', 'Contents', 'MacOS', 'Brave Browser') },
       { name: 'Chromium', path: '/Applications/Chromium.app/Contents/MacOS/Chromium' },
-      { name: 'Arc', path: '/Applications/Arc.app/Contents/MacOS/Arc' },
+      { name: 'Chromium', path: join(homedir(), 'Applications', 'Chromium.app', 'Contents', 'MacOS', 'Chromium') },
     )
   } else if (process.platform === 'win32') {
     const pf = process.env.PROGRAMFILES || 'C:\\Program Files'
@@ -842,16 +866,55 @@ export async function syncOpenAiSessionFromSystemBrowserOnce(signal, options = {
         if (!browserWs) return
         const socket = new WebSocket(browserWs)
         await new Promise((resolveClose) => {
-          const timer = setTimeout(resolveClose, 1200)
-          socket.onopen = () => {
-            socket.send(JSON.stringify({ id: 1, method: 'Browser.close' }))
+          let closed = false
+          const done = () => {
+            if (closed) return
+            closed = true
             clearTimeout(timer)
             resolveClose()
           }
-          socket.onerror = () => { clearTimeout(timer); resolveClose() }
+          const timer = setTimeout(done, 1500)
+          timer.unref?.()
+          socket.onopen = () => {
+            try { socket.send(JSON.stringify({ id: 1, method: 'Browser.close' })) } catch { done() }
+          }
+          socket.onmessage = (event) => {
+            try {
+              const msg = JSON.parse(String(event.data))
+              if (msg.id === 1) done()
+            } catch {}
+          }
+          socket.onerror = done
+          socket.onclose = done
         })
         try { socket.close() } catch {}
       } catch {}
+    }
+
+    const ensurePageTarget = async (port, targets) => {
+      if (!Array.isArray(targets)) return null
+      const platformPage = targets.find(t => t.type === 'page' && typeof t.url === 'string' && t.url.startsWith('https://platform.openai.com'))
+      if (platformPage) return platformPage
+      const authPage = targets.find(t => t.type === 'page' && typeof t.url === 'string' && (
+        t.url.startsWith('https://auth.openai.com')
+        || t.url.startsWith('https://chatgpt.com')
+        || t.url.startsWith('https://accounts.google.com')
+        || t.url.startsWith('https://login.microsoftonline.com')
+        || t.url.startsWith('https://appleid.apple.com')
+      ))
+      if (authPage) return null
+      const blankOrOther = targets.find(t => t.type === 'page' && t.webSocketDebuggerUrl)
+      if (blankOrOther?.webSocketDebuggerUrl) {
+        await evalPage(blankOrOther.webSocketDebuggerUrl, `location.replace(${JSON.stringify(OPENAI_PLATFORM_HOME_URL)})`).catch(() => {})
+        return null
+      }
+      await fetch(`http://127.0.0.1:${port}/json/new?${encodeURIComponent(OPENAI_PLATFORM_HOME_URL)}`, {
+        method: 'PUT',
+        signal: AbortSignal.timeout(2000),
+      }).catch(() => fetch(`http://127.0.0.1:${port}/json/new?${encodeURIComponent(OPENAI_PLATFORM_HOME_URL)}`, {
+        signal: AbortSignal.timeout(2000),
+      }).catch(() => {}))
+      return null
     }
 
     const cleanup = async (value) => {
@@ -954,63 +1017,113 @@ export async function syncOpenAiSessionFromSystemBrowserOnce(signal, options = {
       }
     })
 
+    let emptyChecks = 0
+    let reloginRedirected = false
     const pollOnce = async () => {
       if (settled) return
       try {
         const port = existingPort || (await readFile(portPath, 'utf8').catch(() => '')).trim().split('\n')[0]
         if (port && /^\d+$/.test(port)) {
-          const targets = await fetch(`http://127.0.0.1:${port}/json/list`, {
+          const targetsRes = await fetch(`http://127.0.0.1:${port}/json/list`, {
             signal: AbortSignal.timeout(2000),
-          }).then(r => r.json()).catch(() => [])
-          const pageTarget = Array.isArray(targets)
-            ? targets.find(t => t.type === 'page' && typeof t.url === 'string' && t.url.startsWith('https://platform.openai.com'))
-            : null
-          if (pageTarget?.webSocketDebuggerUrl) {
-            const payload = await evalPage(pageTarget.webSocketDebuggerUrl, `(async () => {
-              const raw = localStorage.getItem(${JSON.stringify(OPENAI_PLATFORM_AUTH_KEY)});
-              const auth = raw ? JSON.parse(raw) : null;
-              const accessToken = typeof auth?.accessToken === "string" ? auth.accessToken : "";
-              const refreshToken = typeof auth?.refreshToken === "string" ? auth.refreshToken : "";
-              if (!accessToken) return null;
-              let accessExpiresAt = 0;
-              try {
-                const parts = accessToken.split(".");
-                if (parts[1]) {
-                  const p = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
-                  if (typeof p?.exp === "number") accessExpiresAt = p.exp > 1e12 ? p.exp : p.exp * 1000;
-                }
-              } catch {}
-              const readJson = async r => { const t = await r.text(); try { return JSON.parse(t); } catch { return null; } };
-              const login = await fetch(${JSON.stringify(OPENAI_ONBOARDING_LOGIN_URL)}, {
-                method: "POST",
-                headers: { Authorization: "Bearer " + accessToken, "Content-Type": "application/json" },
-                body: "{}",
-              });
-              const loginBody = await readJson(login);
-              if (login.status === 401 || login.status === 403) return { authExpired: true };
-              if (!login.ok || !loginBody) return { retry: true };
-              const sessionKey = loginBody?.user?.session?.sensitive_id;
-              if (typeof sessionKey !== "string" || !sessionKey.startsWith("sess-")) return { retry: true };
-              const orgs = Array.isArray(loginBody?.user?.orgs?.data) ? loginBody.user.orgs.data : [];
-              const org = orgs.find(x => x.personal) || orgs[0];
-              const organizationId = typeof org?.id === "string" ? org.id : "";
-              const billing = await fetch(${JSON.stringify(OPENAI_CREDIT_GRANTS_URL)}, {
-                method: "GET",
-                headers: {
-                  Authorization: "Bearer " + sessionKey,
-                  Accept: "application/json",
-                  ...(organizationId ? { "OpenAI-Organization": organizationId } : {}),
-                },
-              });
-              const billingBody = await readJson(billing);
-              if (!billing.ok || !billingBody || billingBody.total_granted === undefined || billingBody.total_used === undefined) {
-                return { retry: true };
-              }
-              return { ok: true, sessionKey, organizationId, accessToken, refreshToken, accessExpiresAt, balance: billingBody };
-            })()`)
-            if (payload?.ok && payload.sessionKey) {
-              finish(payload)
+          }).catch(() => null)
+          if (!targetsRes?.ok) {
+            if (existingPort) {
+              finish({ code: 'login-cancelled', error: `${browser.name} 登录窗口已关闭，尚未完成 OpenAI Platform 登录` })
               return
+            }
+          } else {
+            const targets = await targetsRes.json().catch(() => [])
+            const pageCount = Array.isArray(targets) ? targets.filter(t => t.type === 'page').length : 0
+            if (pageCount === 0) {
+              emptyChecks += 1
+              if (launched && emptyChecks >= 2) {
+                finish({ code: 'login-cancelled', error: `${browser.name} 登录窗口已关闭，尚未完成 OpenAI Platform 登录` })
+                return
+              }
+            } else {
+              emptyChecks = 0
+            }
+            const pageTarget = await ensurePageTarget(port, targets)
+            if (pageTarget?.webSocketDebuggerUrl) {
+              const payload = await evalPage(pageTarget.webSocketDebuggerUrl, `(async () => {
+                const request = async (url, init) => {
+                  const controller = new AbortController();
+                  const timer = setTimeout(() => controller.abort(), 18000);
+                  try { return await fetch(url, { ...init, signal: controller.signal }); }
+                  finally { clearTimeout(timer); }
+                };
+                const raw = localStorage.getItem(${JSON.stringify(OPENAI_PLATFORM_AUTH_KEY)});
+                const auth = raw ? JSON.parse(raw) : null;
+                const accessToken = typeof auth?.accessToken === "string" ? auth.accessToken : "";
+                const refreshToken = typeof auth?.refreshToken === "string" ? auth.refreshToken : "";
+                if (!accessToken) return null;
+                let accessExpiresAt = 0;
+                let deviceId = "";
+                try {
+                  const parts = accessToken.split(".");
+                  if (parts[1]) {
+                    const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+                    const padded = b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), "=");
+                    const p = JSON.parse(atob(padded));
+                    if (typeof p?.exp === "number") accessExpiresAt = p.exp > 1e12 ? p.exp : p.exp * 1000;
+                  }
+                  const didMatch = /(?:^|;\\s*)oai-did=([^;\\s]+)/.exec(document.cookie || "");
+                  if (didMatch?.[1]) deviceId = decodeURIComponent(didMatch[1]);
+                } catch {}
+                const readJson = async r => { const t = await r.text(); try { return JSON.parse(t); } catch { return null; } };
+                const login = await request(${JSON.stringify(OPENAI_ONBOARDING_LOGIN_URL)}, {
+                  method: "POST",
+                  headers: { Authorization: "Bearer " + accessToken, "Content-Type": "application/json" },
+                  body: "{}",
+                });
+                const loginBody = await readJson(login);
+                if (login.status === 401 || login.status === 403) {
+                  try { localStorage.removeItem(${JSON.stringify(OPENAI_PLATFORM_AUTH_KEY)}); } catch {}
+                  return { authExpired: true };
+                }
+                if (!login.ok || !loginBody) return { retry: true };
+                const sessionKey = loginBody?.user?.session?.sensitive_id;
+                if (typeof sessionKey !== "string" || !sessionKey.startsWith("sess-")) return { retry: true };
+                const orgs = Array.isArray(loginBody?.user?.orgs?.data) ? loginBody.user.orgs.data : [];
+                const org = orgs.find(x => x.personal) || orgs[0];
+                const organizationId = typeof org?.id === "string" ? org.id : "";
+                const billing = await request(${JSON.stringify(OPENAI_CREDIT_GRANTS_URL)}, {
+                  method: "GET",
+                  headers: {
+                    Authorization: "Bearer " + sessionKey,
+                    Accept: "application/json",
+                    ...(organizationId ? { "OpenAI-Organization": organizationId } : {}),
+                  },
+                });
+                const billingBody = await readJson(billing);
+                if (billing.status === 401 || billing.status === 403) {
+                  try { localStorage.removeItem(${JSON.stringify(OPENAI_PLATFORM_AUTH_KEY)}); } catch {}
+                  return { authExpired: true };
+                }
+                if (!billing.ok || !billingBody || billingBody.total_granted === undefined || billingBody.total_used === undefined) {
+                  return { retry: true };
+                }
+                return {
+                  ok: true,
+                  source: "openai-platform-system-browser",
+                  sessionKey,
+                  organizationId,
+                  accessToken,
+                  refreshToken,
+                  accessExpiresAt,
+                  deviceId,
+                  balance: billingBody,
+                };
+              })()`)
+              if (payload?.ok && payload.sessionKey) {
+                finish(payload)
+                return
+              }
+              if (payload?.authExpired && !reloginRedirected) {
+                reloginRedirected = true
+                await evalPage(pageTarget.webSocketDebuggerUrl, `location.replace(${JSON.stringify(OPENAI_PLATFORM_HOME_URL)})`).catch(() => {})
+              }
             }
           }
         }
@@ -1026,9 +1139,34 @@ export async function syncOpenAiSessionFromSystemBrowserOnce(signal, options = {
   })
 }
 
+function abortOpenAiBrowserSyncState() {
+  if (openAiBrowserSyncInFlight) {
+    if (openAiBrowserSyncInFlight.abortTimer) {
+      clearTimeout(openAiBrowserSyncInFlight.abortTimer)
+      openAiBrowserSyncInFlight.abortTimer = null
+    }
+    try { openAiBrowserSyncInFlight.controller.abort() } catch {}
+    openAiBrowserSyncInFlight = null
+  }
+  openAiLoginPending = null
+}
+
 async function syncOpenAiSessionFromBrowser(force = false, signal, options = {}) {
   const allowSystemBrowser = options.allowSystemBrowser !== false
-  if (openAiBrowserSyncInFlight) return await subscribeOpenAiBrowserSync(openAiBrowserSyncInFlight, signal)
+  if (openAiBrowserSyncInFlight) {
+    if (force && allowSystemBrowser && !openAiBrowserSyncInFlight.allowSystemBrowser) {
+      // Do not let a background silent check block an explicit user Sync click
+      // from opening the system browser fallback when Ego Lite is unavailable.
+      if (openAiBrowserSyncInFlight.abortTimer) {
+        clearTimeout(openAiBrowserSyncInFlight.abortTimer)
+        openAiBrowserSyncInFlight.abortTimer = null
+      }
+      try { openAiBrowserSyncInFlight.controller.abort() } catch {}
+      openAiBrowserSyncInFlight = null
+    } else {
+      return await subscribeOpenAiBrowserSync(openAiBrowserSyncInFlight, signal)
+    }
+  }
   if (!force && openAiLoginPending) {
     return {
       code: 'login-required',
@@ -1050,6 +1188,7 @@ async function syncOpenAiSessionFromBrowser(force = false, signal, options = {})
     controller: new AbortController(),
     subscribers: new Set(),
     abortTimer: null,
+    allowSystemBrowser,
     promise: null,
   }
   entry.promise = (async () => {
@@ -1073,6 +1212,7 @@ async function syncOpenAiSessionFromBrowser(force = false, signal, options = {})
     return systemResult
   })()
     .then(result => {
+      if (openAiBrowserSyncInFlight !== entry) return result
       openAiBrowserSyncLastError = result?.error ? scrubSecrets(result.error) : ''
       openAiBrowserSyncLastErrorCode = result?.error ? (result?.code || 'sync-failed') : ''
       openAiLoginPending = result?.needsLogin && result?.taskSpaceId
@@ -1082,8 +1222,10 @@ async function syncOpenAiSessionFromBrowser(force = false, signal, options = {})
     })
     .catch(() => {
       const result = { code: 'sync-failed', error: 'OpenAI 浏览器同步失败，请稍后重试' }
-      openAiBrowserSyncLastError = result.error
-      openAiBrowserSyncLastErrorCode = result.code
+      if (openAiBrowserSyncInFlight === entry) {
+        openAiBrowserSyncLastError = result.error
+        openAiBrowserSyncLastErrorCode = result.code
+      }
       return result
     })
     .finally(() => {
@@ -1106,6 +1248,7 @@ export class CodexCliQuotaService {
     this.generation = 0
     this.disposed = false
     this.controllers = new Set()
+    this.failureCount = 0
   }
 
   dispose() {
@@ -1125,13 +1268,47 @@ export class CodexCliQuotaService {
   }
 
   commit(generation, state) {
-    if (generation === this.generation) this.cached = state
+    if (generation === this.generation) {
+      if (state?.status === 'ok' && !state.error) this.failureCount = 0
+      this.cached = state
+    }
     return this.cached ?? state
+  }
+
+  commitFailure(generation, failure) {
+    if (generation !== this.generation) return this.cached ?? {
+      status: failure.status || 'error',
+      error: failure.error,
+      webUrl: CODEX_WEB_URL,
+      preferences: this.getPreferences(),
+    }
+    this.failureCount += 1
+    const retryAfterSec = failure.status === 'unauthorized'
+      ? 60
+      : Math.min(60, 15 * (2 ** Math.min(this.failureCount - 1, 2)))
+    if (this.cached?.quota && failure.status !== 'unauthorized') {
+      const { retryAfterSec: _prevRetry, stale: _prevStale, error: _prevErr, ...rest } = this.cached
+      return this.commit(generation, {
+        ...rest,
+        status: 'ok',
+        stale: true,
+        error: failure.error,
+        retryAfterSec,
+        preferences: this.getPreferences(),
+      })
+    }
+    return this.commit(generation, {
+      status: failure.status || 'error',
+      error: failure.error,
+      retryAfterSec,
+      webUrl: CODEX_WEB_URL,
+      preferences: this.getPreferences(),
+    })
   }
 
   async getQuota(options = {}) {
     const { force = false, signal } = options
-    if (!force && this.cached && this.cached.status === 'ok') {
+    if (!force && this.cached && this.cached.status === 'ok' && !this.cached.stale && !this.cached.error) {
       const ageMs = Date.now() - (this.cached.quota?.fetchedAt ?? 0)
       if (ageMs < 10_000) return { ...this.cached, preferences: this.getPreferences() }
     }
@@ -1202,11 +1379,9 @@ export class CodexCliQuotaService {
     }
 
     const isUnauth = !authJson?.tokens?.access_token && (rpc.status === 401 || rpc.missingCli === true)
-    return this.commit(generation, {
+    return this.commitFailure(generation, {
       status: isUnauth ? 'unauthorized' : 'error',
       error: rpc.message || lastError || '未检测到 Codex CLI 登录态，请在终端运行 `codex login`',
-      webUrl: CODEX_WEB_URL,
-      preferences: this.getPreferences(),
     })
   }
 }
@@ -1232,6 +1407,7 @@ export class CodexApiQuotaService {
       try { controller.abort() } catch {}
     }
     this.controllers.clear()
+    abortOpenAiBrowserSyncState()
   }
 
   getPreferences() {
@@ -1242,19 +1418,29 @@ export class CodexApiQuotaService {
   }
 
   commit(generation, state) {
-    if (state?.status === 'ok' && !state.error) this.failureCount = 0
-    if (generation === this.generation) this.cached = state
+    if (generation === this.generation) {
+      if (state?.status === 'ok' && !state.error) this.failureCount = 0
+      this.cached = state
+    }
     return this.cached ?? state
   }
 
   commitFailure(generation, failure) {
+    if (generation !== this.generation) return this.cached ?? {
+      status: failure.status || 'error',
+      error: failure.error,
+      canSync: true,
+      webUrl: OPENAI_API_WEB_URL,
+      preferences: this.getPreferences(),
+    }
     this.failureCount += 1
     const retryAfterSec = failure.code === 'login-required'
       ? 60
       : Math.min(60, 15 * (2 ** Math.min(this.failureCount - 1, 2)))
     if (this.cached?.quota) {
+      const { retryAfterSec: _prevRetry, stale: _prevStale, error: _prevErr, ...rest } = this.cached
       return this.commit(generation, {
-        ...this.cached,
+        ...rest,
         status: 'ok',
         stale: true,
         error: failure.error,
@@ -1288,6 +1474,7 @@ export class CodexApiQuotaService {
         accessToken,
         refreshToken,
         accessExpiresAt: Number.isFinite(expires) ? expires : 0,
+        deviceId: typeof record.payload.deviceId === 'string' ? record.payload.deviceId.trim() : '',
       }
     } catch {
       return null
@@ -1319,7 +1506,7 @@ export class CodexApiQuotaService {
 
   async getQuota(options = {}) {
     const { force = false, signal } = options
-    if (!force && this.cached && this.cached.status === 'ok') {
+    if (!force && this.cached && this.cached.status === 'ok' && !this.cached.stale && !this.cached.error) {
       const ageMs = Date.now() - (this.cached.quota?.fetchedAt ?? 0)
       if (ageMs < 10_000) return { ...this.cached, preferences: this.getPreferences() }
     }
@@ -1386,6 +1573,7 @@ export class CodexApiQuotaService {
       }
     }
 
+    let oauthFailure = null
     if (stored.accessToken || stored.refreshToken) {
       const oauth = await this._resolveViaOAuth(stored, signal)
       if (oauth.ok) {
@@ -1396,7 +1584,10 @@ export class CodexApiQuotaService {
           preferences: this.getPreferences(),
         })
       }
-      if (oauth.code !== 'login-required' && oauth.code !== 'no-oauth') {
+      oauthFailure = oauth
+      // If pure Node requests hit a network/proxy wall (e.g. browser has VPN/PAC
+      // while Node direct fetch times out), allow silent Ego Lite fallback below.
+      if (oauth.code !== 'login-required' && oauth.code !== 'no-oauth' && !oauth.network) {
         return this.commitFailure(generation, { status: 'error', code: oauth.code, error: oauth.message })
       }
     }
@@ -1410,6 +1601,13 @@ export class CodexApiQuotaService {
       expectedGeneration: generation,
     })
     if (synced.ok) return synced.state
+    if (oauthFailure?.network && synced.code === 'login-required') {
+      return this.commitFailure(generation, {
+        status: 'error',
+        code: 'network',
+        error: oauthFailure.message || 'OpenAI 网络连接超时，将在后台自动重试',
+      })
+    }
     return this.commitFailure(generation, {
       status: synced.code === 'login-required' ? 'unauthorized' : 'error',
       code: synced.code,
@@ -1418,43 +1616,92 @@ export class CodexApiQuotaService {
   }
 
   async _resolveViaOAuth(stored, signal) {
-    if (this.oauthInFlight) return await this._waitForOAuth(this.oauthInFlight.promise, signal)
-    const controller = new AbortController()
-    this.controllers.add(controller)
-    const entry = { controller, promise: null }
-    entry.promise = this._resolveViaOAuthOnce(stored, controller.signal).finally(() => {
-      this.controllers.delete(controller)
+    if (this.oauthInFlight) return await this._waitForOAuth(this.oauthInFlight, signal)
+    const entry = {
+      controller: new AbortController(),
+      subscribers: new Set(),
+      abortTimer: null,
+      promise: null,
+    }
+    this.controllers.add(entry.controller)
+    entry.promise = this._resolveViaOAuthOnce(stored, entry.controller.signal).finally(() => {
+      if (entry.abortTimer) {
+        clearTimeout(entry.abortTimer)
+        entry.abortTimer = null
+      }
+      this.controllers.delete(entry.controller)
       if (this.oauthInFlight === entry) this.oauthInFlight = null
     })
     this.oauthInFlight = entry
-    return await this._waitForOAuth(entry.promise, signal)
+    return await this._waitForOAuth(entry, signal)
   }
 
-  async _waitForOAuth(promise, signal) {
-    if (!signal) return await promise
-    if (signal.aborted) return { ok: false, code: 'aborted', message: 'OpenAI OAuth 请求已取消' }
+  async _waitForOAuth(entry, signal) {
+    if (entry.abortTimer) {
+      clearTimeout(entry.abortTimer)
+      entry.abortTimer = null
+    }
+    const sub = {}
+    entry.subscribers.add(sub)
+    if (!signal) {
+      try {
+        return await entry.promise
+      } finally {
+        entry.subscribers.delete(sub)
+      }
+    }
+    if (signal.aborted) {
+      entry.subscribers.delete(sub)
+      if (entry.subscribers.size === 0 && !entry.abortTimer) {
+        entry.abortTimer = setTimeout(() => {
+          entry.abortTimer = null
+          if (entry.subscribers.size === 0) {
+            try { entry.controller.abort() } catch {}
+          }
+        }, 250)
+        entry.abortTimer.unref?.()
+      }
+      return { ok: false, code: 'aborted', message: 'OpenAI OAuth 请求已取消' }
+    }
     let onAbort
     const cancelled = new Promise(resolve => {
-      onAbort = () => resolve({ ok: false, code: 'aborted', message: 'OpenAI OAuth 请求已取消' })
+      onAbort = () => {
+        entry.subscribers.delete(sub)
+        if (entry.subscribers.size === 0 && !entry.abortTimer) {
+          entry.abortTimer = setTimeout(() => {
+            entry.abortTimer = null
+            if (entry.subscribers.size === 0) {
+              try { entry.controller.abort() } catch {}
+            }
+          }, 250)
+          entry.abortTimer.unref?.()
+        }
+        resolve({ ok: false, code: 'aborted', message: 'OpenAI OAuth 请求已取消' })
+      }
       signal.addEventListener('abort', onAbort, { once: true })
     })
     try {
-      return await Promise.race([promise, cancelled])
+      return await Promise.race([entry.promise, cancelled])
     } finally {
+      entry.subscribers.delete(sub)
       signal.removeEventListener('abort', onAbort)
     }
   }
 
   async _resolveViaOAuthOnce(stored, signal) {
-    let accessToken = stored.accessToken
-    let refreshToken = stored.refreshToken
-    let accessExpiresAt = stored.accessExpiresAt
+    // Re-read credentials in case another refresh rotated tokens just before us.
+    const latest = await this.readStoredSession()
+    let accessToken = latest?.accessToken || stored.accessToken
+    let refreshToken = latest?.refreshToken || stored.refreshToken
+    let accessExpiresAt = latest?.accessExpiresAt ?? stored.accessExpiresAt
+    const deviceId = latest?.deviceId || stored.deviceId || ''
     let didRefresh = false
 
     for (let attempt = 0; attempt < 2; attempt++) {
       if (!isTokenUsable(accessToken, accessExpiresAt)) {
         if (!refreshToken) return { ok: false, code: 'no-oauth', message: '缺少可用的 OpenAI Platform OAuth 令牌' }
-        const refreshed = await refreshOpenAiPlatformOAuthToken(refreshToken, '', signal)
+        const expectedRefresh = refreshToken
+        const refreshed = await refreshOpenAiPlatformOAuthToken(refreshToken, deviceId, signal)
         if (!refreshed.ok) return refreshed
         accessToken = refreshed.accessToken
         refreshToken = refreshed.refreshToken
@@ -1462,7 +1709,7 @@ export class CodexApiQuotaService {
         didRefresh = true
         try {
           // Persist a rotated refresh token before any subsequent network call.
-          const applied = await this.saveCredentials({ accessToken, refreshToken, accessExpiresAt }, stored.refreshToken)
+          const applied = await this.saveCredentials({ accessToken, refreshToken, accessExpiresAt }, expectedRefresh)
           if (!applied) return { ok: false, code: 'credential-changed', message: 'OpenAI 凭证已被其他同步更新，请重试' }
         } catch (error) {
           return { ok: false, code: 'credential-write-failed', message: scrubSecrets(error instanceof Error ? error.message : String(error)) }
@@ -1480,15 +1727,26 @@ export class CodexApiQuotaService {
       }
 
       const balance = await fetchOpenAiCreditBalance(exchanged.sessionKey, exchanged.organizationId, signal)
-      if (!balance.ok) return balance
-      try {
+      if (!balance.ok) {
+        // Save the valid exchanged session so the next retry skips onboarding/login.
         await this.saveCredentials({
           sessionKey: exchanged.sessionKey,
           organizationId: exchanged.organizationId,
           accessToken,
           refreshToken,
           accessExpiresAt,
-        })
+        }, refreshToken).catch(() => {})
+        return balance
+      }
+      try {
+        const applied = await this.saveCredentials({
+          sessionKey: exchanged.sessionKey,
+          organizationId: exchanged.organizationId,
+          accessToken,
+          refreshToken,
+          accessExpiresAt,
+        }, refreshToken)
+        if (!applied) return { ok: false, code: 'credential-changed', message: 'OpenAI 凭证已被其他同步更新，请重试' }
       } catch (error) {
         return { ok: false, code: 'credential-write-failed', message: scrubSecrets(error instanceof Error ? error.message : String(error)) }
       }
@@ -1554,6 +1812,7 @@ export class CodexApiQuotaService {
     if (session.accessToken) payload.accessToken = session.accessToken
     if (session.refreshToken) payload.refreshToken = session.refreshToken
     if (session.accessExpiresAt) payload.accessExpiresAt = session.accessExpiresAt
+    if (session.deviceId) payload.deviceId = session.deviceId
     try {
       await this.saveCredentials(payload)
     } catch (error) {
@@ -1567,6 +1826,7 @@ export class CodexApiQuotaService {
       quota: probe.data,
       preferences: this.getPreferences(),
     }
+    this.failureCount = 0
     this.cached = state
     return { ok: true, state }
   }
@@ -1663,10 +1923,12 @@ export function apply(ctx, config) {
       render: (_args, value) => [{
         type: 'text',
         text: value.status === 'ok'
-          ? `Codex (${value.quota.planType || 'ChatGPT'}): ${value.quota.remainingPercent.toFixed(2)}% remaining (${value.quota.usedPercent.toFixed(2)}% used)${value.quota.primaryWindow?.windowLabel ? `, window ${value.quota.primaryWindow.windowLabel}` : ''}.`
+          ? `Codex (${value.quota.planType || 'ChatGPT'}): ${value.quota.remainingPercent.toFixed(2)}% remaining (${value.quota.usedPercent.toFixed(2)}% used)${value.quota.primaryWindow?.windowLabel ? `, window ${value.quota.primaryWindow.windowLabel}` : ''}.${value.stale ? ` [stale: ${value.error || 'retrying'}]` : ''}`
           : `Codex Quota: ${value.error || value.status}`,
       }],
     },
+    isConcurrencySafe: () => true,
+    timeoutMs: 30_000,
     async execute(args, exec) {
       return await cliService.getQuota({
         force: (args.action ?? 'status') === 'refresh',
@@ -1702,10 +1964,12 @@ export function apply(ctx, config) {
       render: (_args, value) => [{
         type: 'text',
         text: value.status === 'ok'
-          ? `Codex API: $${value.quota.remainingUsd.toFixed(2)} remaining (${value.quota.remainingPercent.toFixed(2)}%), $${value.quota.totalUsedUsd.toFixed(2)} used of $${value.quota.totalGrantedUsd.toFixed(2)}.`
+          ? `Codex API: $${value.quota.remainingUsd.toFixed(2)} remaining (${value.quota.remainingPercent.toFixed(2)}%), $${value.quota.totalUsedUsd.toFixed(2)} used of $${value.quota.totalGrantedUsd.toFixed(2)}.${value.stale ? ` [stale: ${value.error || 'retrying'}]` : ''}`
           : `Codex API Quota: ${value.error || value.status}`,
       }],
     },
+    isConcurrencySafe: (args) => args?.action !== 'sync_browser',
+    timeoutMs: 200_000,
     async execute(args, exec) {
       const action = args.action ?? 'status'
       if (action === 'sync_browser') {
