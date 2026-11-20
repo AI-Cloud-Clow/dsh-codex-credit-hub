@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Codex Credit Hub",
-    "description": "Displays live Codex subscription rate limits and OpenAI / Codex API credit balances above the account avatar. Codex API automatically reuses your local platform.openai.com login session—no API key input, storage, or budget configuration. Supports Refresh and Sync OpenAI login actions, with codex_cli_quota and codex_api_quota agent tools.",
+    "description": "Displays live Codex subscription rate limits and OpenAI / Codex API credit balances above the account avatar. Reuses Ego Lite when available, or opens a dedicated system Chrome / Edge login window once; subsequent OAuth refreshes run in the background. No API key input or storage. Includes Refresh and Sync OpenAI login actions plus codex_cli_quota and codex_api_quota agent tools.",
     "detail": "docs/DETAIL.md"
   }
 }

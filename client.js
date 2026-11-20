@@ -29,7 +29,8 @@ window.__ModuleLoader__.load({
       nextExpiry: 'Next Expiry', updated: 'Updated', refresh: 'Refresh', refreshing: 'Refreshing…',
       manage: 'Manage usage', close: 'Close quota details', error: 'Unable to load Codex quota', retry: 'Try again',
       syncBrowser: 'Sync OpenAI login', syncingBrowser: 'Syncing…',
-      apiHint: 'Requires Ego Lite. If the OpenAI login page opens, sign in there, then click Sync OpenAI login again. No API key is required.',
+      stale: 'Showing the last successful balance; retrying in the background.',
+      apiHint: 'Uses Ego Lite when available, or opens a dedicated Chrome / Edge login window once. Later refreshes run in the background. No API key is required.',
       cliHint: 'Reads ~/.codex/auth.json (read-only) or `codex app-server`. Run `codex login` in terminal to sign in.',
     }
     const zh = {
@@ -42,7 +43,8 @@ window.__ModuleLoader__.load({
       nextExpiry: '最近到期', updated: '更新于', refresh: '刷新', refreshing: '刷新中…',
       manage: '管理用量', close: '关闭额度详情', error: '暂时无法读取 Codex 额度', retry: '重试',
       syncBrowser: '同步 OpenAI 登录态', syncingBrowser: '同步中…',
-      apiHint: '需要安装 Ego Lite。若打开 OpenAI 登录页，请先完成登录，再点击一次「同步 OpenAI 登录态」；无需输入 API Key。',
+      stale: '显示上次成功读取的余额，后台正在自动重试。',
+      apiHint: '优先复用 Ego Lite；没有时会用系统 Chrome / Edge 打开一次专用登录窗口。后续在后台自动续期，无需输入 API Key。',
       cliHint: '自动只读读取 ~/.codex/auth.json 或 codex app-server；若未登录请在终端执行 `codex login`。',
     }
 
@@ -60,7 +62,7 @@ window.__ModuleLoader__.load({
       const schedule = (state) => {
         if (disposed) return
         if (timer !== null) clearTimeout(timer)
-        const seconds = state?.preferences?.refreshIntervalSec ?? 60
+        const seconds = state?.retryAfterSec ?? state?.preferences?.refreshIntervalSec ?? 60
         timer = setTimeout(() => { void load(false) }, Math.max(15, seconds) * 1000)
       }
       const load = async (force = false) => {
@@ -237,6 +239,7 @@ window.__ModuleLoader__.load({
               h('div', null, h('div', { className: 'cxh-factLabel' }, t('totalUsed')), h('div', { className: 'cxh-factValue' }, formatUsd(quota.totalUsedUsd))),
               nextExpiry && h('div', null, h('div', { className: 'cxh-factLabel' }, t('nextExpiry')), h('div', { className: 'cxh-factValue' }, formatResetTime(nextExpiry.expiresAtMs)))),
             h('div', { className: 'cxh-footer' }, h('span', { className: 'cxh-updated' }, `${t('updated')} ${updated}`), h('div', { className: 'cxh-footerActions' }, syncButton, h('button', { type: 'button', className: 'cxh-refresh', disabled: busy !== '', onClick: refresh }, h(RefreshIcon), busy === 'refresh' ? t('refreshing') : t('refresh'))))),
+          quota && state.stale && h('p', { className: 'cxh-help', role: 'status' }, t('stale')),
           quota && state.error && !actionError && h('p', { className: 'cxh-error', role: 'status' }, state.error),
           !quota && state.status === 'loading' && h('div', { className: 'cxh-loading' }, t('loading')),
           !quota && state.status !== 'loading' && !actionError && h('p', { className: state.status === 'unauthorized' ? 'cxh-help' : 'cxh-error', role: 'status' }, state.error || t('error')),

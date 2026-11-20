@@ -2,14 +2,14 @@
   "name": "dsh-codex-credit-hub",
   "displayName": "Codex Credit Hub",
   "description": "Displays live Codex rate limits and OpenAI / Codex API credit balances above the account avatar in DeepSeek Harness.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "type": "module",
   "main": "index.js",
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
   "scripts": {
-    "check": "node --check index.js && node --check client.js"
+    "check": "node --check index.js && node --check openai-sync.inc.js && node --check client.js"
   },
   "dependencies": {},
   "peerDependencies": {

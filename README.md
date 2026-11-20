@@ -13,10 +13,11 @@ DeepSeek Harness 扩展插件，在左侧边栏底部、头像上方显示 **Cod
 ### Codex API
 
 - **只使用 OpenAI Platform 登录态，不接受、不读取、不保存 API Key。**
-- 插件通过本机 Ego Lite 的 `ego-browser` 复用 `platform.openai.com` 登录态，在页面内完成 `POST /v1/dashboard/onboarding/login` 会话兑换和 `GET /v1/dashboard/billing/credit_grants` 余额校验。
+- **优先复用 Ego Lite**：如果本机安装了 Ego Lite 且已登录 `platform.openai.com`，自动读取其 Platform OAuth 登录态。
+- **没有 Ego Lite 也能用**：自动检测系统 Chrome / Edge / Brave / Chromium，打开插件专用登录窗口；登录成功后自动捕获令牌并关闭窗口，不读取或接管日常浏览器配置目录。
+- **后续纯后台续期**：保存 Platform OAuth 访问令牌（约 10 天）和刷新令牌后，后台直接调用 OpenAI OAuth 续期、`onboarding/login` 会话兑换和 `credit_grants` 余额查询，不再为每次刷新打开浏览器。
 - 展示与 `https://platform.openai.com/home` 一致的真实余额、总额度、已用额度、剩余百分比和最近 grant 到期时间。
-- 会话过期、失效或 Node 网络请求超时/失败时自动通过浏览器重新同步；浏览器网络可使用系统代理或 VPN，降低仅 Node 请求超时的影响。
-- 新设备未登录时会保留 OpenAI 登录页；完成登录后，再点击一次「同步 OpenAI 登录态」即可继续。
+- 会话过期时优先在后台续期；只有刷新令牌失效或首次连接时，才需要用户主动点击「同步 OpenAI 登录态」。
 - 临时会话只保存到 DSH 凭证库，不返回给界面或 Agent 工具；默认本地凭证文件在 POSIX 系统仅当前 OS 用户可读，但并非加密存储。卸载插件会取消同步并丢弃内存状态；删除凭证请在 DSH 凭证管理中操作。
 
 ### Agent 工具
@@ -49,7 +50,7 @@ dsh-codex-credit-hub
 指定版本安装（避免包管理器的最新版本观察期影响）：
 
 ```text
-dsh-codex-credit-hub@1.1.0
+dsh-codex-credit-hub@1.2.0
 ```
 
 ### 本地目录安装
@@ -65,7 +66,9 @@ dsh-codex-credit-hub@1.1.0
 
 ## 运行前提与限制
 
-- Codex API 自动同步需要安装并启动 [Ego Lite](https://lite.ego.app/)，完成其初始设置，使 `ego-browser` 命令可用。
-- 同步依赖 Ego Lite 中的 OpenAI Platform 登录态；它与系统默认浏览器、Chrome 的登录状态不是同一份。如果 Chrome 已登录但 Ego Lite 未登录，插件会打开登录页，登录后需再次点击同步。
+- 首次连接 OpenAI Platform 需要一个可登录的浏览器：优先使用 Ego Lite；没有时使用系统 Chrome / Edge / Brave / Chromium 的插件专用窗口。
+- 插件不会读取 Safari 或日常 Chrome 的本地数据目录，也不会要求用户手动复制 `sess-...` 或 API Key。
+- 系统浏览器登录使用独立目录 `<DSH_HOME>/codex-credit-hub-browser`，其中可能保存 OpenAI 登录 Cookie；删除该目录即可清除这套专用浏览器登录状态。
+- 日常刷新依赖 DSH 凭证库中的 OAuth 刷新令牌；默认本地凭证文件在 POSIX 系统仅当前 OS 用户可读，并非加密存储。撤销 OpenAI 登录或删除该凭证后，需要重新连接。
 - OpenAI Platform 的 `onboarding/login` 和 `credit_grants` 属于网页端接口，不是 OpenAI 面向普通 API Key 的公开余额 API；如果 OpenAI 调整接口，插件会显示同步失败并保留手动重试入口。
 - Codex 订阅额度与 OpenAI API 预付/赠送余额是不同账户体系，插件分别展示，不互相推算。
